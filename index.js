@@ -20,33 +20,30 @@ let BAD_REQUEST_PREDICATES = [
     ({ request }) =>
         request.headers["content-type"] !== "application/x-www-form-urlencoded",
 
-    ({ payload }) => !payload,
-    ({ payload }) => !payload.get("source"),
-    ({ payload }) => !payload.get("target"),
+    ({ mention }) => !mention,
 
-    ({ payload }) => payload.get("target") === payload.get("source"),
+    ({ mention }) => mention.target === mention.source,
 
-    ({ payload }) => !URL.canParse(payload.get("source")),
-    ({ payload }) => !URL.canParse(payload.get("target")),
+    ({ mention }) => !URL.canParse(mention.source),
+    ({ mention }) => !URL.canParse(mention.target),
 
-    ({ payload }) =>
+    ({ mention }) =>
         ALLOWED_TARGET_BASE_URLS.length > 0
         && !ALLOWED_TARGET_BASE_URLS.some(
-            target => payload.get("target").startsWith(target)
+            allowedBaseUrl => mention.target.startsWith(allowedBaseUrl)
         ),
 
-    ({ payload }) =>
-        !(payload.get("target").startsWith("https://")
-            || payload.get("target").startsWith("http://"))
+    ({ mention }) =>
+        !(mention.target.startsWith("https://")
+            || mention.target.startsWith("http://"))
 
 ];
 
-function isValid(request, body) {
-    let payload = new URLSearchParams(body);
+function isValid(request, mention) {
 
     let isBadRequest =
         BAD_REQUEST_PREDICATES.some(isBad =>
-            isBad({ request, payload })
+            isBad({ mention, request })
         );
 
     if (isBadRequest && DEBUG) {
@@ -63,6 +60,10 @@ function isValid(request, body) {
 
 function toMention(body) {
     let payload = new URLSearchParams(body);
+
+    if (!payload.get("source") || !payload.get("target")) {
+        return null;
+    }
 
     return {
         source: payload.get("source"),
@@ -88,8 +89,9 @@ const server = http.createServer((request, response) => {
     let content = getBody(request);
 
     content.then((body) => {
-        if (isValid(request, body)) {
-            let mention = toMention(body);
+        let mention = toMention(body);
+
+        if (isValid(request, mention)) {
 
             if (isEnqueueable(mention)) {
                 queue.push(mention);
@@ -196,24 +198,40 @@ async function validateMention() {
         // only a heuristic - prone to false-postives!
         let isMentioned = data?.includes(mention.target);
 
-        received.webmentions.push({
-            ...mention,
-            validated: true,
-            mentioned: isMentioned,
-            validatedAt: Date.now()
-        });
+        let existing = received.webmentions
+            .find(isDuplicate(mention));
+
+        if (existing) {
+            existing.validatedAt = Date.now()
+            existing.isMentioned = isMentioned;
+        } else {
+            received.webmentions.push({
+                ...mention,
+                validated: true,
+                mentioned: isMentioned,
+                validatedAt: Date.now()
+            });
+        }
 
         await writeFile(
             path.resolve(__dirname, mentionsFile),
             JSON.stringify(received)
         );
     } else if (response?.status === 410) {
-        received.webmentions.push({
-            ...mention,
-            validated: true,
-            deleted: true,
-            validatedAt: Date.now()
-        });
+        let existing = received.webmentions
+            .find(isDuplicate(mention));
+
+        if (existing) {
+            existing.validatedAt = Date.now()
+            existing.deleted = true;
+        } else {
+            received.webmentions.push({
+                ...mention,
+                validated: true,
+                deleted: true,
+                validatedAt: Date.now()
+            });
+        }
 
         await writeFile(
             path.resolve(__dirname, mentionsFile),
